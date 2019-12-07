@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<CodeBlocks_project_file>
+	<FileVersion major="1" minor="6" />
+	<Project>
+		<Option title="receiving_quotes" />
+		<Option pch_mode="2" />
+		<Option compiler="mingw_64_7_3_0" />
+		<Build>
+			<Target title="Release">
+				<Option output="bin/Release/receiving_quotes" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Release/" />
+				<Option type="1" />
+				<Option compiler="mingw_64_7_3_0" />
+				<Compiler>
+					<Add option="-O2" />
+					<Add option="-std=c++11" />
+					<Add directory="../../../boost_1_71_0/boost_all/include/boost-1_71" />
+					<Add directory="../../../boost_1_71_0/boost_all/lib" />
+					<Add directory="../../include" />
+				</Compiler>
+				<Linker>
+					<Add option="-s" />
+					<Add library="ws2_32" />
+					<Add library="wsock32" />
+					<Add directory="../../../boost_1_71_0/boost_all/include/boost-1_71" />
+					<Add directory="../../include" />
+				</Linker>
+			</Target>
+		</Build>
+		<Compiler>
+			<Add option="-Wall" />
+			<Add option="-fexceptions" />
+		</Compiler>
+		<Unit filename="../../include/metatrader-bridge.hpp" />
+		<Unit filename="main.cpp" />
+		<Extensions>
+			<code_completion />
+			<envvars />
+			<debugger />
+			<lib_finder disable_auto="1" />
+		</Extensions>
+	</Project>
+</CodeBlocks_project_file>

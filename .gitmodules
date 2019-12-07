@@ -1,0 +1,6 @@
+[submodule "lib/CPP-Easy-Socket"]
+	path = lib/CPP-Easy-Socket
+	url = https://github.com/NewYaroslav/CPP-Easy-Socket.git
+[submodule "lib/xquotes_history"]
+	path = lib/xquotes_history
+	url = https://github.com/NewYaroslav/xquotes_history.git
