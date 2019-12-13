@@ -4,3 +4,6 @@
 [submodule "lib/xquotes_history"]
 	path = lib/xquotes_history
 	url = https://github.com/NewYaroslav/xquotes_history.git
+[submodule "lib/libp7-baical"]
+	path = lib/libp7-baical
+	url = https://github.com/CMakePorts/libp7-baical.git

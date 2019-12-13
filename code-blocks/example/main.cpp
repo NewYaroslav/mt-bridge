@@ -28,6 +28,7 @@ int main() {
             << symbol
             << std::endl;
     });
+    std::cout << "mt-bridge version: " << iMT.get_mt_bridge_version() << std::endl;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_WAIT));
 

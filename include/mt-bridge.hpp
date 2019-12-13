@@ -72,9 +72,12 @@ namespace mt_bridge {
     private:
         std::thread thread_server;  /**< Поток сервера */
 
+        const uint32_t MT_BRIDGE_MAX_VERSION = 1;
+
         std::atomic<bool> is_mt_connected;  /**< Флаг установленного соединения */
         std::atomic<bool> is_error;
         std::atomic<uint32_t> num_symbol;       /**< Количество символов */
+        std::atomic<uint32_t> mt_bridge_version;/**< Версия MT-Bridge для metatrader */
         std::atomic<uint64_t> hist_init_len;    /**< Глубина исторических данных */
         std::vector<std::string> symbol_list;   /**< Список символов */
         std::mutex symbol_list_mutex;
@@ -88,7 +91,6 @@ namespace mt_bridge {
         std::mutex array_candles_mutex;
 
         std::atomic<uint64_t> server_timestamp;
-        //std::atomic<uint64_t> last_server_timestamp;
 
         /** \brief Класс соединения
          */
@@ -152,6 +154,7 @@ namespace mt_bridge {
             is_mt_connected = false;
             is_error = false;
             num_symbol = 0;
+            mt_bridge_version = 0;
             hist_init_len = 0;
             server_timestamp = 0;
             //last_server_timestamp = 0;
@@ -179,7 +182,12 @@ namespace mt_bridge {
                         symbol_timestamp.clear();
                     }
                     try {
-                        /* сначала читаем количество символов */
+                        /* читаем версию эксперта для Metatrdaer */
+                        mt_bridge_version = connection->read_uint32();
+                        if(mt_bridge_version > MT_BRIDGE_MAX_VERSION)
+                            throw("Error! Unsupported expert version for metatrader");
+
+                        /* читаем количество символов */
                         num_symbol = connection->read_uint32();
 
                         /* инициализируем массивы тиковых данных */
@@ -302,6 +310,13 @@ namespace mt_bridge {
                 return true;
             }
             return false;
+        }
+
+        /** \brief Получить версию MT-Bridge
+         * \return Версия MT-Bridge, начиная с 1. Если вернет 0, значит нет подключения
+         */
+        inline uint32_t get_mt_bridge_version() {
+            return mt_bridge_version;
         }
 
         /** \brief Получить список имен символов/валютных пар
