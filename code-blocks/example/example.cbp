@@ -2,7 +2,7 @@
 <CodeBlocks_project_file>
 	<FileVersion major="1" minor="6" />
 	<Project>
-		<Option title="receiving_quotes" />
+		<Option title="example" />
 		<Option pch_mode="2" />
 		<Option compiler="mingw_64_7_3_0" />
 		<Build>
@@ -31,7 +31,7 @@
 			<Add option="-Wall" />
 			<Add option="-fexceptions" />
 		</Compiler>
-		<Unit filename="../../include/metatrader-bridge.hpp" />
+		<Unit filename="../../include/mt-bridge.hpp" />
 		<Unit filename="main.cpp" />
 		<Extensions>
 			<code_completion />
