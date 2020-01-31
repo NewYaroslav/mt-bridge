@@ -8,13 +8,13 @@
 Данная библиотека представляет из себя сервер, который подключается через сокет к клиенту (советнику в Metatrader). 
 Клиент передает на сервер (т.е. в программу на С++) следующий массив данных:
 
-- Во время инициализации подключения передается 
+* Во время инициализации подключения передается 
 	1. версия советника 
 	2. количество символов (валютных пар), указанные в советнике
 	3. имена символов
 	4. также передаются значения для инициализации N баров всех символов (open,high,low,close,volume), чтобы в программе были доступны прошедшие бары для инициализации индикаторов.
 	
-- После инициализации советник передает в программу:
+* После инициализации советник передает в программу:
 	1. состояния текущего бара для всех символов 
 	2. цены bid и ask всех символов 
 	3. метку времени сервера.
@@ -103,6 +103,58 @@ int main() {
             << " t: " << candle.timestamp
             << " s: " << iMT.get_server_timestamp()
             << std::endl;
+    }
+    return 0;
+}
+```
+
+Также в конструктор класса *MtBridge* была добавлена возможность вызывать лямбду-функцию для обработки получения событий (получение нового тика или бара исторических данных).
+
+```
+#include <iostream>
+#include <mt-bridge.hpp>
+
+int main() {
+    const uint32_t port = 5555;
+    mt_bridge::MtBridge iMT(
+            port,
+            10, // количество баров в истории для первоначальной инициализации (не может быть больше, чем задано в советнике)
+            [&](const std::map<std::string, mt_bridge::MtCandle> &candles,
+                const mt_bridge::MtBridge::EventType event,
+                const uint64_t timestamp) {
+        mt_bridge::MtCandle candle = mt_bridge::MtBridge::get_candle("EURUSD", candles);
+        switch(event) {
+        case mt_bridge::MtBridge::EventType::HISTORICAL_DATA_RECEIVED:
+            std::cout << "history bar: " << timestamp << " minute day: " << ((timestamp / 60) % 1440) << std::endl;
+            if(mt_bridge::MtBridge::check_candle(candle)) {
+                std::cout << "EURUSD, close: " << candle.close
+                    << " volume: " << candle.volume
+                    << " t: " << candle.timestamp << std::endl;
+            } else {
+                std::cout << "EURUSD, error"<< std::endl;
+            }
+            break;
+        case mt_bridge::MtBridge::EventType::NEW_TICK:
+            std::cout << "news tick: " << timestamp << std::endl;
+            if(mt_bridge::MtBridge::check_candle(candle)) {
+                std::cout << "EURUSD, close: " << candle.close
+                    << " volume: " << candle.volume
+                    << " t: " << candle.timestamp << std::endl;
+            } else {
+                std::cout << "EURUSD, error"<< std::endl;
+            }
+            break;
+        };
+    });
+
+    if(!iMT.wait()) {
+        std::cout << "no connection" << std::endl;
+        return 0;
+    }
+    std::cout << "connection established" << std::endl;
+	
+    while(true) {
+        std::this_thread::yield();
     }
     return 0;
 }
