@@ -1,0 +1,9 @@
+code-blocks/*/obj/
+code-blocks/*/*.dll
+code-blocks/*/*.depend
+code-blocks/*/*.layout
+code-blocks/*/gmon.out
+code-blocks/*/bin/
+doc/logo/*
+lib/libseh-0.0.4.zip
+lib/libseh-0.0.4/*

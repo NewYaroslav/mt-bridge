@@ -369,7 +369,7 @@ namespace mt_bridge {
                 while(true) {
                     if(is_stop_command) return;
                     uint64_t timestamp = server_timestamp;
-                    if(timestamp <= last_timestamp) {
+                    if(timestamp <= last_timestamp || !is_mt_connected) {
                         std::this_thread::yield();
                         continue;
                     }
@@ -400,6 +400,7 @@ namespace mt_bridge {
                         continue;
                     }
                     hist_data_number_bars = server_minute - last_minute;
+                    const int64_t start_timestamp = last_minute * SECONDS_IN_MINUTE;
                     last_minute = server_minute;
 
                     /* загружаем исторические данные в несколько потоков */
@@ -408,12 +409,15 @@ namespace mt_bridge {
                         SECONDS_IN_MINUTE;
 
                     std::vector<std::map<std::string, CANDLE_TYPE>> hist_array_candles;
-                    init_historical_data(hist_array_candles, download_date_timestamp, hist_data_number_bars);
+                    init_historical_data(
+                        hist_array_candles,
+                        download_date_timestamp,
+                        hist_data_number_bars);
                     for(size_t i = 0; i < hist_array_candles.size(); ++i) {
                         if(callback != nullptr) callback(
                             hist_array_candles[i],
                             EventType::HISTORICAL_DATA_RECEIVED,
-                            download_date_timestamp + i * SECONDS_IN_MINUTE);
+                            start_timestamp + i * SECONDS_IN_MINUTE);
                     }
                 } // while
                 is_stop = true;
@@ -442,7 +446,6 @@ namespace mt_bridge {
          */
         inline bool wait() {
             while(!is_error && !is_mt_connected) {
-                //std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::this_thread::yield();
             }
             return is_mt_connected;
@@ -623,6 +626,29 @@ namespace mt_bridge {
                 symbol_index = it->second;
             }
             return get_timestamp_candle(symbol_index, timestamp, price_type);
+        }
+
+        /** \brief Получить бар по имени
+         * \param symbol_name Имя валютной пары
+         * \param candles Карта баров валютных пар
+         * \return Бар
+         */
+        inline const static CANDLE_TYPE get_candle(
+                const std::string &symbol_name,
+                const std::map<std::string, CANDLE_TYPE> &candles) {
+            auto it = candles.find(symbol_name);
+            if(it == candles.end()) return CANDLE_TYPE();
+            if(it->second.close == 0 || it->second.timestamp == 0) return CANDLE_TYPE();
+            return it->second;
+        }
+
+        /** \brief Проверить бар
+         * \param candle Бар
+         * \return Вернет true, если данные по бару корректны
+         */
+        inline const static bool check_candle(CANDLE_TYPE &candle) {
+            if(candle.close == 0 || candle.timestamp == 0) return false;
+            return true;
         }
     };
 
