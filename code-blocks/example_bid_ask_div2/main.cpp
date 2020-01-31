@@ -30,35 +30,32 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_WAIT));
 
     const uint32_t symbol_index = 0; // first symbol in the list
-    /* get historical data to initialize your indicators */
-    std::cout << iMT.get_symbol_list()[symbol_index] << std::endl;
-    std::vector<mt_bridge::MtCandle> candles = iMT.get_candles(symbol_index);
-    for(size_t i = 0; i < candles.size(); ++i) {
-        std::cout << "candle, o: " << candles[i].open
-            << " h: " << candles[i].high
-            << " l: " << candles[i].low
-            << " c: " << candles[i].close
-            << " v: " << candles[i].volume
-            << " t: " << candles[i].timestamp
-            << std::endl;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_WAIT));
 
     /* quotations stream */
     while(true) {
         if(!iMT.update_server_timestamp()) continue;
         mt_bridge::MtCandle candle = iMT.get_candle(symbol_index);
+        double price = (iMT.get_ask(symbol_index) + iMT.get_bid(symbol_index)) / 2;
         std::cout
             << iMT.get_symbol_list()[symbol_index]
-            << " candle,"
-            //<< " o: " << candle.open
-            //<< " h: " << candle.high
-            //<< " l: " << candle.low
-            << " ask: " << iMT.get_ask(symbol_index)
-            << " c: " << candle.close
+            << " (ask+bid)/2 = " << price
             << " v: " << candle.volume
             << " t: " << candle.timestamp
+            << " s: " << iMT.get_server_timestamp()
+            << std::endl;
+        mt_bridge::MtCandle candle2 = iMT.get_timestamp_candle(symbol_index, iMT.get_server_timestamp());
+        std::cout
+            << iMT.get_symbol_list()[symbol_index]
+            << " close = " << candle2.close
+            << " v: " << candle2.volume
+            << " t: " << candle2.timestamp
+            << " s: " << iMT.get_server_timestamp()
+            << std::endl;
+        mt_bridge::MtCandle candle3 = iMT.get_timestamp_candle("EURCAD", iMT.get_server_timestamp());
+        std::cout
+            << "EURCAD close = " << candle3.close
+            << " v: " << candle3.volume
+            << " t: " << candle3.timestamp
             << " s: " << iMT.get_server_timestamp()
             << std::endl;
     }

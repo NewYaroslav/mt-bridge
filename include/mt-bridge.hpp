@@ -15,6 +15,12 @@
 namespace mt_bridge {
     using boost::asio::ip::tcp;
 
+    enum class PriceType {
+        PRICE_BID,
+        PRICE_ASK,
+        PRICE_BID_ASK_DIV2
+    };
+
     /** \brief Класс для хранения бара
      */
     class MtCandle {
@@ -80,6 +86,7 @@ namespace mt_bridge {
         std::atomic<uint32_t> mt_bridge_version;/**< Версия MT-Bridge для metatrader */
         std::atomic<uint64_t> hist_init_len;    /**< Глубина исторических данных */
         std::vector<std::string> symbol_list;   /**< Список символов */
+        std::map<std::string,uint32_t> symbol_name_to_index;
         std::mutex symbol_list_mutex;
 
         std::vector<double> symbol_bid; /**< Массив цены bid тиков символов */
@@ -168,6 +175,7 @@ namespace mt_bridge {
                     {
                         std::lock_guard<std::mutex> _mutex(symbol_list_mutex);
                         symbol_list.clear();
+                        symbol_name_to_index.clear();
                     }
                     /* очистим массивы символов */
                     {
@@ -210,6 +218,7 @@ namespace mt_bridge {
                             symbol_list.reserve(num_symbol);
                             for(uint32_t s = 0; s < num_symbol; ++s) {
                                 symbol_list.push_back(connection->read_string());
+                                symbol_name_to_index[symbol_list.back()] = s;
                             }
                         }
 
@@ -324,7 +333,7 @@ namespace mt_bridge {
          */
         std::vector<std::string> get_symbol_list() {
             if(!is_mt_connected) return std::vector<std::string>();
-            std::lock_guard<std::mutex> _mutex(symbol_list_mutex);
+            std::lock_guard<std::mutex> lock(symbol_list_mutex);
             return symbol_list;
         }
 
@@ -334,7 +343,7 @@ namespace mt_bridge {
          */
         inline double get_bid(const uint32_t symbol_index) {
             if(!is_mt_connected || symbol_index >= num_symbol) return 0.0;
-            std::lock_guard<std::mutex> _mutex(symbol_tick_mutex);
+            std::lock_guard<std::mutex> lock(symbol_tick_mutex);
             return symbol_bid[symbol_index];
         }
 
@@ -344,33 +353,130 @@ namespace mt_bridge {
          */
         inline double get_ask(const uint32_t symbol_index) {
             if(!is_mt_connected || symbol_index >= num_symbol) return 0.0;
-            std::lock_guard<std::mutex> _mutex(symbol_tick_mutex);
+            std::lock_guard<std::mutex> lock(symbol_tick_mutex);
             return symbol_ask[symbol_index];
         }
 
         /** \brief Получить бар
          * \param symbol_index Индекс символа
          * \param offset Смещение относительно последнего бара
-         * \return Бар/Свеча
+         * \return Бар
          */
-        CANDLE_TYPE get_candle(const uint32_t symbol_index, const uint32_t offset = 0) {
+        inline CANDLE_TYPE get_candle(const uint32_t symbol_index, const uint32_t offset = 0) {
             if(!is_mt_connected || symbol_index >= num_symbol) return CANDLE_TYPE();
-            std::lock_guard<std::mutex> _mutex(array_candles_mutex);
+            std::lock_guard<std::mutex> lock(array_candles_mutex);
             const size_t array_size = array_candles[symbol_index].size();
             if(offset >= array_size) return CANDLE_TYPE();
             return array_candles[symbol_index][array_size - offset - 1];
+        }
+
+        /** \brief Получить бар
+         * \param symbol_name Имя символа
+         * \param offset Смещение относительно последнего бара
+         * \return Бар
+         */
+        inline CANDLE_TYPE get_candle(const std::string &symbol_name) {
+            uint32_t symbol_index;
+            {
+                std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                auto it = symbol_name_to_index.find(symbol_name);
+                if(it == symbol_name_to_index.end()) return CANDLE_TYPE();
+                symbol_index = it->second;
+            }
+            return get_candle(symbol_index);
         }
 
         /** \brief Получить массив баров
          * \param symbol_index Индекс символа
          * \return Массив баров
          */
-        std::vector<CANDLE_TYPE> get_candles(const uint32_t symbol_index) {
+        inline std::vector<CANDLE_TYPE> get_candles(const uint32_t symbol_index) {
             if(!is_mt_connected || symbol_index >= num_symbol) return  std::vector<CANDLE_TYPE>();
-            std::lock_guard<std::mutex> _mutex(array_candles_mutex);
+            std::lock_guard<std::mutex> lock(array_candles_mutex);
             return array_candles[symbol_index];
         }
 
+
+        /** \brief Получить массив баров
+         * \param symbol_name Имя символа
+         * \return Массив баров
+         */
+        inline std::vector<CANDLE_TYPE> get_candles(const std::string &symbol_name) {
+            uint32_t symbol_index;
+            {
+                std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                auto it = symbol_name_to_index.find(symbol_name);
+                if(it == symbol_name_to_index.end()) return CANDLE_TYPE();
+                symbol_index = it->second;
+            }
+            return get_candles(symbol_index);
+        }
+
+        /** \brief Получить бар по метке времени
+         *
+         * \param symbol_index Индекс символа
+         * \param timestamp Метка времени
+         * \param price_type Тип цены
+         * \return Цена bid, ask или (bid+ask)/2
+         */
+        inline CANDLE_TYPE get_timestamp_candle(
+                const uint32_t symbol_index,
+                const uint64_t timestamp,
+                const PriceType price_type = PriceType::PRICE_BID) {
+            if(!is_mt_connected || symbol_index >= num_symbol) return CANDLE_TYPE();
+            const uint64_t first_timestamp = (timestamp / 60) * 60;
+            std::lock_guard<std::mutex> lock(array_candles_mutex);
+
+            const size_t array_candles_size =
+                array_candles[symbol_index].size();
+            if(array_candles_size == 0) return CANDLE_TYPE();
+            size_t index = array_candles_size - 1;
+            /* особый случай, бар еще не успел сформироваться */
+            if(array_candles[symbol_index].back().timestamp == (first_timestamp - 60)) {
+                double price = 0;
+                {
+                    std::lock_guard<std::mutex> lock2(symbol_tick_mutex);
+                    const double ask = symbol_ask[symbol_index];
+                    const double bid = symbol_bid[symbol_index];
+                    price = price_type == PriceType::PRICE_BID_ASK_DIV2 ?
+                        (bid + ask) /2.0 : price_type == PriceType::PRICE_BID ?
+                        bid : price_type == PriceType::PRICE_ASK ?
+                        ask : bid;
+                }
+                return CANDLE_TYPE(price, price, price, price,
+                    0, first_timestamp);
+            }
+            while(true) {
+                if(array_candles[symbol_index][index].timestamp == first_timestamp) {
+                    return array_candles[symbol_index][index];
+                }
+                if(index > 0) --index;
+                else break;
+            }
+            return CANDLE_TYPE();
+        }
+
+
+        /** \brief Получить бар по метке времени
+         *
+         * \param symbol_name Имя символа
+         * \param timestamp Метка времени
+         * \param price_type Тип цены
+         * \return Цена bid, ask или (bid+ask)/2
+         */
+        inline CANDLE_TYPE get_timestamp_candle(
+                const std::string &symbol_name,
+                const uint64_t timestamp,
+                const PriceType price_type = PriceType::PRICE_BID) {
+            uint32_t symbol_index;
+            {
+                std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                auto it = symbol_name_to_index.find(symbol_name);
+                if(it == symbol_name_to_index.end()) return CANDLE_TYPE();
+                symbol_index = it->second;
+            }
+            return get_timestamp_candle(symbol_index, timestamp, price_type);
+        }
     };
 
     typedef MetatraderBridge<> MtBridge; /**< Класс Моста между Metatrader
