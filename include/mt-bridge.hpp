@@ -15,12 +15,6 @@
 namespace mt_bridge {
     using boost::asio::ip::tcp;
 
-    enum class PriceType {
-        PRICE_BID,
-        PRICE_ASK,
-        PRICE_BID_ASK_DIV2
-    };
-
     /** \brief Класс для хранения бара
      */
     class MtCandle {
@@ -80,6 +74,8 @@ namespace mt_bridge {
 
         const uint32_t MT_BRIDGE_MAX_VERSION = 1;
 
+        const uint64_t SECONDS_IN_MINUTE = 60;
+
         std::atomic<bool> is_mt_connected;  /**< Флаг установленного соединения */
         std::atomic<bool> is_error;
         std::atomic<uint32_t> num_symbol;       /**< Количество символов */
@@ -97,7 +93,11 @@ namespace mt_bridge {
         std::vector<std::vector<CANDLE_TYPE>> array_candles;
         std::mutex array_candles_mutex;
 
-        std::atomic<uint64_t> server_timestamp;
+        std::atomic<uint64_t> server_timestamp; /**< Метка времени сервера */
+
+
+        std::atomic<bool> is_stop_command;      /**< Команда закрытия соединения */
+        std::atomic<bool> is_stop;              /**< Флаг закрытия соединения */
 
         /** \brief Класс соединения
          */
@@ -152,14 +152,61 @@ namespace mt_bridge {
             }
         };
 
+        void init_historical_data(
+                std::vector<std::map<std::string, CANDLE_TYPE>> &candles,
+                const uint64_t date_timestamp,
+                const uint32_t number_bars) {
+            const int64_t first_timestamp = (date_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE;
+            const int64_t start_timestamp = first_timestamp - (number_bars - 1) * SECONDS_IN_MINUTE;
+            std::lock_guard<std::mutex> lock(symbol_list_mutex);
+            candles.resize(number_bars);
+            for(uint32_t symbol_index = 0;
+                symbol_index < num_symbol;
+                ++symbol_index) {
+                std::string symbol_name = symbol_list[symbol_index];
+                for(size_t i = 0; i < candles.size(); ++i) {
+                    candles[i][symbol_name].timestamp = i * SECONDS_IN_MINUTE + start_timestamp;
+                }
+                for(size_t i = 0; i < array_candles[symbol_index].size(); ++i) {
+                    const int64_t index = ((int64_t)array_candles[symbol_index][i].timestamp - start_timestamp) / (int64_t)SECONDS_IN_MINUTE;
+                    if(index < 0) continue;
+                    if(index >= number_bars) continue;
+                    candles[index][symbol_name] = array_candles[symbol_index][i];
+                }
+            }
+        }
+
     public:
+
+        /// Типы События
+        enum class EventType {
+            NEW_TICK,                   /**< Получен новый тик */
+            HISTORICAL_DATA_RECEIVED,   /**< Получены исторические данные */
+        };
+
+        /// Типы цены
+        enum class PriceType {
+            PRICE_BID,          /**< Цена Bid */
+            PRICE_ASK,          /**< Цена Ask */
+            PRICE_BID_ASK_DIV2  /**< Цена (bid+ask)/2 */
+        };
 
         /** \brief Конструктор моста метатрейдера
          * \param port Номер порта
+         * \param number_bars
+         * \param callback
          */
-        MetatraderBridge(const uint32_t port) {
+        MetatraderBridge(
+                const uint32_t port,
+                const uint32_t number_bars = 1440,
+                std::function<void(
+                    const std::map<std::string, CANDLE_TYPE> &candles,
+                    const EventType event,
+                    const uint64_t timestamp)> callback = nullptr) {
             is_mt_connected = false;
             is_error = false;
+            is_stop_command = false;
+            is_stop = false;
             num_symbol = 0;
             mt_bridge_version = 0;
             hist_init_len = 0;
@@ -168,23 +215,24 @@ namespace mt_bridge {
             /* запустим соединение в отдельном потоке */
             thread_server = std::thread([&, port]{
                 while(true) {
+                    if(is_stop_command) return;
                     /* создадим соединение */
                     std::shared_ptr<MtConnection> connection =
                         std::make_shared<MtConnection>(port);
                     /* очистим список символов */
                     {
-                        std::lock_guard<std::mutex> _mutex(symbol_list_mutex);
+                        std::lock_guard<std::mutex> lock(symbol_list_mutex);
                         symbol_list.clear();
                         symbol_name_to_index.clear();
                     }
                     /* очистим массивы символов */
                     {
-                        std::lock_guard<std::mutex> _mutex(array_candles_mutex);
+                        std::lock_guard<std::mutex> lock(array_candles_mutex);
                         array_candles.clear();
                     }
                     /* очищаем массивы для тиков */
                     {
-                        std::lock_guard<std::mutex> _mutex(symbol_tick_mutex);
+                        std::lock_guard<std::mutex> lock(symbol_tick_mutex);
                         symbol_bid.clear();
                         symbol_ask.clear();
                         symbol_timestamp.clear();
@@ -200,7 +248,7 @@ namespace mt_bridge {
 
                         /* инициализируем массивы тиковых данных */
                         {
-                            std::lock_guard<std::mutex> _mutex(symbol_tick_mutex);
+                            std::lock_guard<std::mutex> lock(symbol_tick_mutex);
                             symbol_bid.resize(num_symbol);
                             symbol_ask.resize(num_symbol);
                             symbol_timestamp.resize(num_symbol);
@@ -208,13 +256,13 @@ namespace mt_bridge {
 
                         /* инициализируем массив баров */
                         {
-                            std::lock_guard<std::mutex> _mutex(array_candles_mutex);
+                            std::lock_guard<std::mutex> lock(array_candles_mutex);
                             array_candles.resize(num_symbol);
                         }
 
                         /* читаем имена символов */
                         {
-                            std::lock_guard<std::mutex> _mutex(symbol_list_mutex);
+                            std::lock_guard<std::mutex> lock(symbol_list_mutex);
                             symbol_list.reserve(num_symbol);
                             for(uint32_t s = 0; s < num_symbol; ++s) {
                                 symbol_list.push_back(connection->read_string());
@@ -226,6 +274,7 @@ namespace mt_bridge {
                         hist_init_len = connection->read_uint32();
                         uint64_t read_len = 0;
                         while(true) {
+                            if(is_stop_command) return;
                             /* читаем данные символов */
                             for(uint32_t s = 0; s < num_symbol; ++s) {
                                 const double bid = connection->read_double();
@@ -240,14 +289,14 @@ namespace mt_bridge {
                                 const uint64_t timestamp = connection->read_uint64();
                                 /* сохраняем тик */
                                 {
-                                    std::lock_guard<std::mutex> _mutex(symbol_tick_mutex);
+                                    std::lock_guard<std::mutex> lock(symbol_tick_mutex);
                                     symbol_bid[s] = bid;
                                     symbol_ask[s] = ask;
                                     symbol_timestamp[s] = timestamp;
                                 }
                                 /* сохраняем бар */
                                 {
-                                    std::lock_guard<std::mutex> _mutex(array_candles_mutex);
+                                    std::lock_guard<std::mutex> lock(array_candles_mutex);
                                     if(array_candles[s].size() == 0 || array_candles[s].back().timestamp < timestamp) {
                                         array_candles[s].push_back(CANDLE_TYPE(open, high, low, close, volume, timestamp));
                                     } else
@@ -271,7 +320,7 @@ namespace mt_bridge {
                             }
                         } // while
                     } catch (std::exception& e) {
-                        std::cerr << e.what() << std::endl;
+                        std::cerr << "error: " << e.what() << std::endl;
                         is_mt_connected = false;
                         is_error = true;
                     } catch (...) {
@@ -284,6 +333,99 @@ namespace mt_bridge {
                 }
             });
             thread_server.detach();
+            if(callback == nullptr) return;
+            /* создаем поток обработки событий */
+            std::thread stream_thread = std::thread([&,number_bars, callback] {
+                while(!is_mt_connected) {
+                    std::this_thread::yield();
+                }
+                /* сначала инициализируем исторические данные */
+                uint32_t hist_data_number_bars = number_bars;
+                while(true) {
+                    if(is_stop_command) return;
+                    const uint64_t init_date_timestamp =
+                        ((server_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) - SECONDS_IN_MINUTE;
+                    std::vector<std::map<std::string, CANDLE_TYPE>> hist_array_candles;
+                    init_historical_data(hist_array_candles, init_date_timestamp, hist_data_number_bars);
+                    /* далее отправляем загруженные данные в callback */
+                    uint64_t start_timestamp = init_date_timestamp - (hist_data_number_bars - 1) * SECONDS_IN_MINUTE;
+                    for(size_t i = 0; i < hist_array_candles.size(); ++i) {
+                        const uint64_t timestamp = i * SECONDS_IN_MINUTE + start_timestamp;
+                        if(callback != nullptr) callback(
+                            hist_array_candles[i],
+                            EventType::HISTORICAL_DATA_RECEIVED,
+                            timestamp);
+                    }
+                    const uint64_t end_date_timestamp =
+                        ((server_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) -
+                       SECONDS_IN_MINUTE;
+                    if(end_date_timestamp == init_date_timestamp) break;
+                    hist_data_number_bars = (end_date_timestamp - init_date_timestamp) / SECONDS_IN_MINUTE;
+                }
+
+                /* далее занимаемся получением новых тиков */
+                uint64_t last_timestamp = server_timestamp;
+                uint64_t last_minute = last_timestamp / SECONDS_IN_MINUTE;
+                while(true) {
+                    if(is_stop_command) return;
+                    uint64_t timestamp = server_timestamp;
+                    if(timestamp <= last_timestamp) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    /* начало новой секунды,
+                     * собираем актуальные цены бара и вызываем callback
+                     */
+                    last_timestamp = timestamp;
+                    std::map<std::string, CANDLE_TYPE> candles;
+                    {
+                        std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                        for(uint32_t symbol_index = 0;
+                            symbol_index < num_symbol;
+                            ++symbol_index) {
+                            std::string symbol_name(symbol_list[symbol_index]);
+                            candles[symbol_name] = get_timestamp_candle(symbol_index, timestamp);
+                        }
+                    }
+
+                    /* вызов callback */
+                    if(callback != nullptr) callback(candles, EventType::NEW_TICK, timestamp);
+
+                    /* загрузка исторических данных и повторный вызов callback,
+                     * если нужно
+                     */
+                    uint64_t server_minute = timestamp / SECONDS_IN_MINUTE;
+                    if(server_minute <= last_minute) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    hist_data_number_bars = server_minute - last_minute;
+                    last_minute = server_minute;
+
+                    /* загружаем исторические данные в несколько потоков */
+                    const uint64_t download_date_timestamp =
+                        ((timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) -
+                        SECONDS_IN_MINUTE;
+
+                    std::vector<std::map<std::string, CANDLE_TYPE>> hist_array_candles;
+                    init_historical_data(hist_array_candles, download_date_timestamp, hist_data_number_bars);
+                    for(size_t i = 0; i < hist_array_candles.size(); ++i) {
+                        if(callback != nullptr) callback(
+                            hist_array_candles[i],
+                            EventType::HISTORICAL_DATA_RECEIVED,
+                            download_date_timestamp + i * SECONDS_IN_MINUTE);
+                    }
+                } // while
+                is_stop = true;
+            });
+            stream_thread.detach();
+        }
+
+        ~MetatraderBridge() {
+            is_stop_command = true;
+            while(!is_stop) {
+                std::this_thread::yield();
+            }
         }
 
         /** \brief Проверить соединение
@@ -300,7 +442,8 @@ namespace mt_bridge {
          */
         inline bool wait() {
             while(!is_error && !is_mt_connected) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                //std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::yield();
             }
             return is_mt_connected;
         }
@@ -313,6 +456,7 @@ namespace mt_bridge {
         }
 
         inline bool update_server_timestamp() {
+            if(!is_mt_connected) return false;
             static uint64_t last_server_timestamp = 0;
             if(server_timestamp != last_server_timestamp) {
                 last_server_timestamp = server_timestamp;
@@ -376,6 +520,7 @@ namespace mt_bridge {
          * \return Бар
          */
         inline CANDLE_TYPE get_candle(const std::string &symbol_name) {
+            if(!is_mt_connected) return CANDLE_TYPE();
             uint32_t symbol_index;
             {
                 std::lock_guard<std::mutex> lock(symbol_list_mutex);
@@ -402,6 +547,7 @@ namespace mt_bridge {
          * \return Массив баров
          */
         inline std::vector<CANDLE_TYPE> get_candles(const std::string &symbol_name) {
+            if(!is_mt_connected) return  std::vector<CANDLE_TYPE>();
             uint32_t symbol_index;
             {
                 std::lock_guard<std::mutex> lock(symbol_list_mutex);
@@ -424,7 +570,7 @@ namespace mt_bridge {
                 const uint64_t timestamp,
                 const PriceType price_type = PriceType::PRICE_BID) {
             if(!is_mt_connected || symbol_index >= num_symbol) return CANDLE_TYPE();
-            const uint64_t first_timestamp = (timestamp / 60) * 60;
+            const uint64_t first_timestamp = (timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE;
             std::lock_guard<std::mutex> lock(array_candles_mutex);
 
             const size_t array_candles_size =
@@ -432,7 +578,7 @@ namespace mt_bridge {
             if(array_candles_size == 0) return CANDLE_TYPE();
             size_t index = array_candles_size - 1;
             /* особый случай, бар еще не успел сформироваться */
-            if(array_candles[symbol_index].back().timestamp == (first_timestamp - 60)) {
+            if(array_candles[symbol_index].back().timestamp == (first_timestamp - SECONDS_IN_MINUTE)) {
                 double price = 0;
                 {
                     std::lock_guard<std::mutex> lock2(symbol_tick_mutex);
@@ -468,6 +614,7 @@ namespace mt_bridge {
                 const std::string &symbol_name,
                 const uint64_t timestamp,
                 const PriceType price_type = PriceType::PRICE_BID) {
+            if(!is_mt_connected) return CANDLE_TYPE();
             uint32_t symbol_index;
             {
                 std::lock_guard<std::mutex> lock(symbol_list_mutex);
