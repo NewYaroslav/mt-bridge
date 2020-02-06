@@ -32,6 +32,18 @@ int main() {
             }
             break;
         };
+
+        /* просто проверяем */
+        std::map<std::string, mt_bridge::MtCandle> candles_2 = iMT.get_candles(timestamp);
+        mt_bridge::MtCandle candle_2 = mt_bridge::MtBridge::get_candle("EURUSD", candles_2);
+        std::cout << "news candle: " << timestamp << std::endl;
+        if(mt_bridge::MtBridge::check_candle(candle_2)) {
+            std::cout << "EURUSD, close: " << candle_2.close
+                << " volume: " << candle_2.volume
+                << " t: " << candle_2.timestamp << std::endl;
+        } else {
+            std::cout << "EURUSD, error (candle_2)"<< std::endl;
+        }
     });
 
     if(!iMT.wait()) {
@@ -55,9 +67,10 @@ int main() {
     std::cout << "mt-bridge version: " << iMT.get_mt_bridge_version() << std::endl;
 #endif
 
-    /* quotations stream */
+    /* stop */
     while(true) {
         std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
     return 0;
 }

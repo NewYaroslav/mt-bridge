@@ -94,7 +94,7 @@ namespace mt_bridge {
         std::mutex array_candles_mutex;
 
         std::atomic<uint64_t> server_timestamp; /**< Метка времени сервера */
-
+        std::atomic<uint64_t> last_server_timestamp;
 
         std::atomic<bool> is_stop_command;      /**< Команда закрытия соединения */
         std::atomic<bool> is_stop;              /**< Флаг закрытия соединения */
@@ -176,7 +176,93 @@ namespace mt_bridge {
             }
         }
 
+        /* реализуем замер смещения времени за 256 отсчетов */
+        const uint32_t array_offset_timestamp_size = 256;
+        std::array<double, 256> array_offset_timestamp; /**< Массив смещения метки времени */
+        uint8_t index_array_offset_timestamp = 0;       /**< Индекс элемента массива смещения метки времени */
+        uint32_t index_array_offset_timestamp_count = 0;
+        double last_offset_timestamp_sum = 0;
+        std::atomic<double> offset_timestamp;           /**< Смещение метки времени */
+        std::atomic<bool> is_autoupdate_logger_offset_timestamp;
+
+        /** \brief Обновить смещение метки времени
+         *
+         * Данный метод использует оптимизированное скользящее среднее
+         * для выборки из 256 элеметов для нахождения смещения метки времени сервера
+         * относительно времени компьютера
+         * \param offset смещение метки времени
+         */
+        inline void update_offset_timestamp(const double offset) {
+            if(index_array_offset_timestamp_count != array_offset_timestamp_size) {
+                array_offset_timestamp[index_array_offset_timestamp] = offset;
+                index_array_offset_timestamp_count = (uint32_t)index_array_offset_timestamp + 1;
+                last_offset_timestamp_sum += offset;
+                offset_timestamp = last_offset_timestamp_sum / (double)index_array_offset_timestamp_count;
+                ++index_array_offset_timestamp;
+                return;
+            }
+            /* находим скользящее среднее смещения метки времени сервера относительно компьютера */
+            last_offset_timestamp_sum = last_offset_timestamp_sum +
+                (offset - array_offset_timestamp[index_array_offset_timestamp]);
+            array_offset_timestamp[index_array_offset_timestamp++] = offset;
+            offset_timestamp = last_offset_timestamp_sum/
+                (double)array_offset_timestamp_size;
+        }
+
+        inline  uint64_t get_timestamp(
+            const uint32_t &day,
+            const uint32_t &month,
+            const uint32_t &year,
+            const uint32_t &hour,
+            const uint32_t &minute,
+            const uint32_t &second) {
+            uint64_t _secs;
+            long _mon, _year;
+            long long _days; // для предотвращения проблемы 2038 года переменная должна быть больше 32 бит
+            _mon = month - 1;
+            const long _TBIAS_YEAR = 1900;
+            const long long _DAYS_IN_YEAR = 365;
+            const long	lmos[] = {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335};
+            const long	mos[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+            _year = year - _TBIAS_YEAR;
+            _days = (((_year - 1) / 4) + ((((_year) & 03) || ((_year) == 0)) ? mos[_mon] : lmos[_mon])) - 1;
+            _days += _DAYS_IN_YEAR * _year;
+            _days += day;
+            const long _TBIAS_DAYS = 25567;
+            const uint64_t _SECONDS_IN_MINUTE = 60;
+            const uint64_t _SECONDS_IN_HOUR = 3600;
+            const uint64_t _SECONDS_IN_DAY = 86400;
+            _days -= _TBIAS_DAYS;
+            _secs = _SECONDS_IN_HOUR * hour;
+            _secs += _SECONDS_IN_MINUTE * minute;
+            _secs += second;
+            _secs += _days * _SECONDS_IN_DAY;
+            return _secs;
+        }
+
+        inline uint64_t get_timestamp() {
+            time_t rawtime;
+            time(&rawtime);
+            struct tm* ptm;
+            ptm = gmtime(&rawtime);
+            return get_timestamp(ptm->tm_mday, ptm->tm_mon + 1, ptm->tm_year + 1900, ptm->tm_hour, ptm->tm_min, ptm->tm_sec);
+        }
+
+        inline double get_ftimestamp() {
+            uint64_t t = get_timestamp();
+            timeb tb;
+            ftime(&tb);
+            return (double)t + (double)tb.millitm/1000.0;
+        }
+
     public:
+
+        /** \brief Получить время сервера с дробной частью
+         * \return время сервера
+         */
+        inline double get_server_ftimestamp() {
+            return get_ftimestamp() + offset_timestamp;
+        }
 
         /// Типы События
         enum class EventType {
@@ -211,7 +297,8 @@ namespace mt_bridge {
             mt_bridge_version = 0;
             hist_init_len = 0;
             server_timestamp = 0;
-            //last_server_timestamp = 0;
+            last_server_timestamp = 0;
+            offset_timestamp = 0;
             /* запустим соединение в отдельном потоке */
             thread_server = std::thread([&, port]{
                 while(true) {
@@ -312,6 +399,15 @@ namespace mt_bridge {
                             }
                             /* читаем метку времени сервера */
                             server_timestamp = connection->read_uint64();
+
+                            /* если метка времени поменялась, найдем время сервера */
+                            if(last_server_timestamp != server_timestamp) {
+                                last_server_timestamp = (uint64_t)server_timestamp;
+                                double pc_time = get_ftimestamp();
+                                double offset_time = (double)server_timestamp - pc_time;
+                                update_offset_timestamp(offset_time);
+                            }
+
                             ++read_len;
                             if(read_len > hist_init_len) {
                                 /* теперь мы вправе сказать, что соединение удалось */
@@ -338,6 +434,7 @@ namespace mt_bridge {
             std::thread stream_thread = std::thread([&,number_bars, callback] {
                 while(!is_mt_connected) {
                     std::this_thread::yield();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 /* сначала инициализируем исторические данные */
                 uint32_t hist_data_number_bars = number_bars;
@@ -364,13 +461,14 @@ namespace mt_bridge {
                 }
 
                 /* далее занимаемся получением новых тиков */
-                uint64_t last_timestamp = server_timestamp;
+                uint64_t last_timestamp = (uint64_t)get_server_ftimestamp();;
                 uint64_t last_minute = last_timestamp / SECONDS_IN_MINUTE;
                 while(true) {
                     if(is_stop_command) return;
-                    uint64_t timestamp = server_timestamp;
+                    uint64_t timestamp = (uint64_t)get_server_ftimestamp();;
                     if(timestamp <= last_timestamp || !is_mt_connected) {
                         std::this_thread::yield();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
                     /* начало новой секунды,
@@ -397,6 +495,7 @@ namespace mt_bridge {
                     uint64_t server_minute = timestamp / SECONDS_IN_MINUTE;
                     if(server_minute <= last_minute) {
                         std::this_thread::yield();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
                     hist_data_number_bars = server_minute - last_minute;
@@ -419,6 +518,7 @@ namespace mt_bridge {
                             EventType::HISTORICAL_DATA_RECEIVED,
                             start_timestamp + i * SECONDS_IN_MINUTE);
                     }
+                    std::this_thread::yield();
                 } // while
                 is_stop = true;
             });
@@ -429,6 +529,7 @@ namespace mt_bridge {
             is_stop_command = true;
             while(!is_stop) {
                 std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
 
@@ -447,6 +548,7 @@ namespace mt_bridge {
         inline bool wait() {
             while(!is_error && !is_mt_connected) {
                 std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             return is_mt_connected;
         }
@@ -649,6 +751,20 @@ namespace mt_bridge {
         inline const static bool check_candle(CANDLE_TYPE &candle) {
             if(candle.close == 0 || candle.timestamp == 0) return false;
             return true;
+        }
+
+        std::map<std::string, CANDLE_TYPE> get_candles(const uint64_t timestamp) {
+            std::map<std::string, CANDLE_TYPE> candles;
+            {
+                std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                for(uint32_t symbol_index = 0;
+                    symbol_index < num_symbol;
+                    ++symbol_index) {
+                    std::string symbol_name(symbol_list[symbol_index]);
+                    candles[symbol_name] = get_timestamp_candle(symbol_index, timestamp);
+                }
+            }
+            return candles;
         }
     };
 
