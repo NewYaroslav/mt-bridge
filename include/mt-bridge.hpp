@@ -10,6 +10,7 @@
 #include <ctime>
 #include <cstring>
 #include <atomic>
+#include <future>
 #include <string.h>
 
 namespace mt_bridge {
@@ -70,7 +71,9 @@ namespace mt_bridge {
     template<class CANDLE_TYPE = MtCandle>
     class MetatraderBridge {
     private:
-        std::thread thread_server;  /**< Поток сервера */
+        //std::thread thread_server;
+        std::future<void> server_future;    /**< Поток сервера */
+        std::future<void> callback_future;
 
         const uint32_t MT_BRIDGE_MAX_VERSION = 1;
 
@@ -97,7 +100,6 @@ namespace mt_bridge {
         std::atomic<uint64_t> last_server_timestamp;
 
         std::atomic<bool> is_stop_command;      /**< Команда закрытия соединения */
-        std::atomic<bool> is_stop;              /**< Флаг закрытия соединения */
 
         /** \brief Класс соединения
          */
@@ -292,7 +294,6 @@ namespace mt_bridge {
             is_mt_connected = false;
             is_error = false;
             is_stop_command = false;
-            is_stop = false;
             num_symbol = 0;
             mt_bridge_version = 0;
             hist_init_len = 0;
@@ -300,9 +301,9 @@ namespace mt_bridge {
             last_server_timestamp = 0;
             offset_timestamp = 0;
             /* запустим соединение в отдельном потоке */
-            thread_server = std::thread([&, port]{
-                while(true) {
-                    if(is_stop_command) return;
+            //thread_server = std::thread([&, port]{
+            server_future = std::async(std::launch::async,[&, port]() {
+                while(!is_stop_command) {
                     /* создадим соединение */
                     std::shared_ptr<MtConnection> connection =
                         std::make_shared<MtConnection>(port);
@@ -360,8 +361,7 @@ namespace mt_bridge {
                         /* читаем глубину истории для инициализации */
                         hist_init_len = connection->read_uint32();
                         uint64_t read_len = 0;
-                        while(true) {
-                            if(is_stop_command) return;
+                        while(!is_stop_command) {
                             /* читаем данные символов */
                             for(uint32_t s = 0; s < num_symbol; ++s) {
                                 const double bid = connection->read_double();
@@ -428,18 +428,19 @@ namespace mt_bridge {
                     std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_WAIT));
                 }
             });
-            thread_server.detach();
+            //thread_server.detach();
             if(callback == nullptr) return;
             /* создаем поток обработки событий */
-            std::thread stream_thread = std::thread([&,number_bars, callback] {
+            //std::thread stream_thread = std::thread([&,number_bars, callback] {
+            callback_future = std::async(std::launch::async,[&, number_bars, callback]() {
                 while(!is_mt_connected) {
                     std::this_thread::yield();
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if(is_stop_command) return;
                 }
                 /* сначала инициализируем исторические данные */
                 uint32_t hist_data_number_bars = number_bars;
-                while(true) {
-                    if(is_stop_command) return;
+                while(!is_stop_command) {
                     const uint64_t init_date_timestamp =
                         ((server_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) - SECONDS_IN_MINUTE;
                     std::vector<std::map<std::string, CANDLE_TYPE>> hist_array_candles;
@@ -463,8 +464,7 @@ namespace mt_bridge {
                 /* далее занимаемся получением новых тиков */
                 uint64_t last_timestamp = (uint64_t)get_server_ftimestamp();;
                 uint64_t last_minute = last_timestamp / SECONDS_IN_MINUTE;
-                while(true) {
-                    if(is_stop_command) return;
+                while(!is_stop_command) {
                     uint64_t timestamp = (uint64_t)get_server_ftimestamp();;
                     if(timestamp <= last_timestamp || !is_mt_connected) {
                         std::this_thread::yield();
@@ -520,16 +520,41 @@ namespace mt_bridge {
                     }
                     std::this_thread::yield();
                 } // while
-                is_stop = true;
             });
-            stream_thread.detach();
+            //stream_thread.detach();
         }
 
         ~MetatraderBridge() {
             is_stop_command = true;
-            while(!is_stop) {
-                std::this_thread::yield();
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            /* Существует проблема с циклом yield().
+             * Если поток, вызывающий деструктор, имеет более высокий приоритет, чем завершаемый поток,
+             * то ваш проект может вечно жить в однопроцессорной системе.
+             * Даже в многоядерной системе может быть большая задержка.
+             * https://coderoad.ru/7927773
+             */
+            if(server_future.valid()) {
+                try {
+                    server_future.wait();
+                    server_future.get();
+                }
+                catch(const std::exception &e) {
+                    std::cerr << "Error: ~MetatraderBridge(), what: " << e.what() << std::endl;
+                }
+                catch(...) {
+                    std::cerr << "Error: ~MetatraderBridge()" << std::endl;
+                }
+            }
+            if(callback_future.valid()) {
+                try {
+                    callback_future.wait();
+                    callback_future.get();
+                }
+                catch(const std::exception &e) {
+                    std::cerr << "Error: ~MetatraderBridge(), what: " << e.what() << std::endl;
+                }
+                catch(...) {
+                    std::cerr << "Error: ~MetatraderBridge()" << std::endl;
+                }
             }
         }
 
