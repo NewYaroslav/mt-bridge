@@ -7,3 +7,6 @@
 [submodule "lib/libp7-baical"]
 	path = lib/libp7-baical
 	url = https://github.com/CMakePorts/libp7-baical.git
+[submodule "lib/xtime_cpp"]
+	path = lib/xtime_cpp
+	url = https://github.com/NewYaroslav/xtime_cpp.git

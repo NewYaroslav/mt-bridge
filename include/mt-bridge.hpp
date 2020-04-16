@@ -71,7 +71,6 @@ namespace mt_bridge {
     template<class CANDLE_TYPE = MtCandle>
     class MetatraderBridge {
     private:
-        //std::thread thread_server;
         std::future<void> server_future;    /**< Поток сервера */
         std::future<void> callback_future;
 
@@ -185,7 +184,7 @@ namespace mt_bridge {
         uint32_t index_array_offset_timestamp_count = 0;
         double last_offset_timestamp_sum = 0;
         std::atomic<double> offset_timestamp;           /**< Смещение метки времени */
-        std::atomic<bool> is_autoupdate_logger_offset_timestamp;
+        std::atomic<int64_t> offset_timezone;           /**< Смещение метки времени из-за часового пояса (это значение надо прибавлять к времени сервера) */
 
         /** \brief Обновить смещение метки времени
          *
@@ -211,7 +210,16 @@ namespace mt_bridge {
                 (double)array_offset_timestamp_size;
         }
 
-        inline  uint64_t get_timestamp(
+        /** \brief Обновить смещение метки времени из-за часового пояса
+         *
+         * \param t смещение метки времени
+         */
+        inline void update_offset_timezone(const uint64_t t) {
+            int64_t temp = (int64_t)((std::abs((double)get_timestamp() - (double)t) / 900.0d) + 0.5d) * 900;
+            offset_timezone = get_timestamp() > t ? temp : -temp;
+        }
+
+        inline uint64_t get_timestamp(
             const uint32_t &day,
             const uint32_t &month,
             const uint32_t &year,
@@ -259,11 +267,36 @@ namespace mt_bridge {
 
     public:
 
+        inline double get_offset_timestamp() {
+            return offset_timestamp;
+        }
+
+        /** \brief Получить время сервера с дробной частью в часовом поясе терминала
+         * \return время сервера
+         */
+        inline double get_server_ftimestamp_with_timezone() {
+            return get_ftimestamp() + offset_timestamp;
+        }
+
         /** \brief Получить время сервера с дробной частью
          * \return время сервера
          */
         inline double get_server_ftimestamp() {
-            return get_ftimestamp() + offset_timestamp;
+            return get_ftimestamp() + offset_timestamp + offset_timezone;
+        }
+
+        /** \brief Получить метку времени сервера MetaTrader
+         * \return Метка времени сервера MetaTrader
+         */
+        inline uint64_t get_server_timestamp() {
+            return server_timestamp + offset_timezone;
+        }
+
+        /** \brief Получить метку времени сервера MetaTrader
+         * \return Метка времени сервера MetaTrader
+         */
+        inline uint64_t get_raw_server_timestamp() {
+            return server_timestamp;
         }
 
         /// Типы События
@@ -300,8 +333,9 @@ namespace mt_bridge {
             server_timestamp = 0;
             last_server_timestamp = 0;
             offset_timestamp = 0;
+            offset_timezone = 0;
+
             /* запустим соединение в отдельном потоке */
-            //thread_server = std::thread([&, port]{
             server_future = std::async(std::launch::async,[&, port]() {
                 while(!is_stop_command) {
                     /* создадим соединение */
@@ -373,7 +407,11 @@ namespace mt_bridge {
                                 const double close = connection->read_double();
 
                                 const uint64_t volume = connection->read_uint64();
-                                const uint64_t timestamp = connection->read_uint64();
+                                uint64_t timestamp = connection->read_uint64();
+
+                                /* если смещение метки времени из-за часового пояса уже известно, учтем это смещение */
+                                if(read_len > 0) timestamp += offset_timezone;
+
                                 /* сохраняем тик */
                                 {
                                     std::lock_guard<std::mutex> lock(symbol_tick_mutex);
@@ -381,6 +419,7 @@ namespace mt_bridge {
                                     symbol_ask[s] = ask;
                                     symbol_timestamp[s] = timestamp;
                                 }
+
                                 /* сохраняем бар */
                                 {
                                     std::lock_guard<std::mutex> lock(array_candles_mutex);
@@ -396,11 +435,29 @@ namespace mt_bridge {
                                         array_candles[s].back().timestamp = timestamp;
                                     }
                                 }
-                            }
+                            } // for s
+
                             /* читаем метку времени сервера */
                             server_timestamp = connection->read_uint64();
 
-                            /* если метка времени поменялась, найдем время сервера */
+                            /* если читаем данные в первый раз, обновим метку времени для всех баров */
+                            if(read_len == 0) {
+                                /* обновляем смещение метки времени из-за часового пояса */
+                                update_offset_timezone(server_timestamp);
+
+                                for(uint32_t s = 0; s < num_symbol; ++s) {
+                                    {
+                                        std::lock_guard<std::mutex> lock(symbol_tick_mutex);
+                                        symbol_timestamp[s] += offset_timezone;
+                                    }
+                                    std::lock_guard<std::mutex> lock(array_candles_mutex);
+                                    for(uint32_t i = 0; i < array_candles[s].size(); ++i) {
+                                        array_candles[s][i].timestamp += offset_timezone;
+                                    }
+                                }
+                            }
+
+                            /* если метка времени поменялась, найдем истинное время сервера */
                             if(last_server_timestamp != server_timestamp) {
                                 last_server_timestamp = (uint64_t)server_timestamp;
                                 double pc_time = get_ftimestamp();
@@ -426,12 +483,12 @@ namespace mt_bridge {
                     }
                     const uint32_t DELAY_WAIT = 1000;
                     std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_WAIT));
-                }
+                } // while
             });
-            //thread_server.detach();
+
             if(callback == nullptr) return;
+
             /* создаем поток обработки событий */
-            //std::thread stream_thread = std::thread([&,number_bars, callback] {
             callback_future = std::async(std::launch::async,[&, number_bars, callback]() {
                 while(!is_mt_connected) {
                     std::this_thread::yield();
@@ -442,7 +499,7 @@ namespace mt_bridge {
                 uint32_t hist_data_number_bars = number_bars;
                 while(!is_stop_command) {
                     const uint64_t init_date_timestamp =
-                        ((server_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) - SECONDS_IN_MINUTE;
+                        (((server_timestamp + offset_timezone) / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) - SECONDS_IN_MINUTE;
                     std::vector<std::map<std::string, CANDLE_TYPE>> hist_array_candles;
                     init_historical_data(hist_array_candles, init_date_timestamp, hist_data_number_bars);
                     /* далее отправляем загруженные данные в callback */
@@ -455,7 +512,7 @@ namespace mt_bridge {
                             timestamp);
                     }
                     const uint64_t end_date_timestamp =
-                        ((server_timestamp / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) -
+                        (((server_timestamp + offset_timezone) / SECONDS_IN_MINUTE) * SECONDS_IN_MINUTE) -
                        SECONDS_IN_MINUTE;
                     if(end_date_timestamp == init_date_timestamp) break;
                     hist_data_number_bars = (end_date_timestamp - init_date_timestamp) / SECONDS_IN_MINUTE;
@@ -568,21 +625,21 @@ namespace mt_bridge {
         /** \brief Подождать соединение
          *
          * Данный метод ждет, пока не установится соединение
+         * \param callback Лямбда функция, которая вызывается каждую секунду ожидания (время вызова функции обладает низкой точностью!)
          * \return вернет true, если соединение есть, иначе произошла ошибка
          */
-        inline bool wait() {
+        inline bool wait(std::function<void(const uint64_t second)> callback = nullptr) {
+            uint64_t tick = 0;
+            const uint64_t WAIT_DELAY = 10;
+            const uint64_t MS_IN_SECOND = 1000;
             while(!is_error && !is_mt_connected) {
                 std::this_thread::yield();
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_DELAY));
+                if(callback == nullptr) continue;
+                tick += WAIT_DELAY;
+                if((tick % MS_IN_SECOND) == 0) callback(tick / MS_IN_SECOND);
             }
             return is_mt_connected;
-        }
-
-        /** \brief Получить метку времени сервера MetaTrader
-         * \return Метка времени сервера MetaTrader
-         */
-        inline uint64_t get_server_timestamp() {
-            return server_timestamp;
         }
 
         inline bool update_server_timestamp() {
