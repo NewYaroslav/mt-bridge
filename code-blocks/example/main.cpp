@@ -1,5 +1,6 @@
 #include <iostream>
 #include <mt-bridge.hpp>
+#include <xtime.hpp>
 
 int main() {
     const uint32_t port = 5555;
@@ -33,13 +34,13 @@ int main() {
     /* get historical data to initialize your indicators */
     std::cout << iMT.get_symbol_list()[symbol_index] << std::endl;
     std::vector<mt_bridge::MtCandle> candles = iMT.get_candles(symbol_index);
-    for(size_t i = 0; i < candles.size(); ++i) {
+    for(size_t i = candles.size()/2; i < candles.size(); ++i) {
         std::cout << "candle, o: " << candles[i].open
             << " h: " << candles[i].high
             << " l: " << candles[i].low
             << " c: " << candles[i].close
             << " v: " << candles[i].volume
-            << " t: " << candles[i].timestamp
+            << " t: " << xtime::get_str_date_time(candles[i].timestamp)
             << std::endl;
     }
 
@@ -58,8 +59,21 @@ int main() {
             << " ask: " << iMT.get_ask(symbol_index)
             << " c: " << candle.close
             << " v: " << candle.volume
-            << " t: " << candle.timestamp
-            << " s: " << iMT.get_server_timestamp()
+            << " t: " << xtime::get_str_date_time(candle.timestamp)
+            << " s: " << xtime::get_str_date_time(iMT.get_server_timestamp())
+            << std::endl;
+        mt_bridge::MtCandle candle2 = iMT.get_timestamp_candle(symbol_index, xtime::get_timestamp());
+        std::cout
+            << iMT.get_symbol_list()[symbol_index]
+            << " candle2,"
+            //<< " o: " << candle.open
+            //<< " h: " << candle.high
+            //<< " l: " << candle.low
+            << " ask: " << iMT.get_ask(symbol_index)
+            << " c: " << candle2.close
+            << " v: " << candle2.volume
+            << " t: " << xtime::get_str_date_time(candle2.timestamp)
+            << " s: " << xtime::get_str_date_time(iMT.get_server_timestamp())
             << std::endl;
     }
     return 0;

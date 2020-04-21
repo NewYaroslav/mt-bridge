@@ -267,6 +267,9 @@ namespace mt_bridge {
 
     public:
 
+        /** \brief Получить смещение метки времени
+         * \return смещение метки времени
+         */
         inline double get_offset_timestamp() {
             return offset_timestamp;
         }
@@ -367,6 +370,8 @@ namespace mt_bridge {
 
                         /* читаем количество символов */
                         num_symbol = connection->read_uint32();
+                        if(num_symbol == 0)
+                            throw("Error! Invalid list of currency pairs!");
 
                         /* инициализируем массивы тиковых данных */
                         {
@@ -400,7 +405,6 @@ namespace mt_bridge {
                             for(uint32_t s = 0; s < num_symbol; ++s) {
                                 const double bid = connection->read_double();
                                 const double ask = connection->read_double();
-
                                 const double open = connection->read_double();
                                 const double high = connection->read_double();
                                 const double low = connection->read_double();
@@ -473,11 +477,11 @@ namespace mt_bridge {
                             }
                         } // while
                     } catch (std::exception& e) {
-                        std::cerr << "error: " << e.what() << std::endl;
+                        std::cerr << "mt-bridge server error: " << e.what() << std::endl;
                         is_mt_connected = false;
                         is_error = true;
                     } catch (...) {
-                        std::cerr << "error" << std::endl;
+                        std::cerr << "mt-bridge server error" << std::endl;
                         is_mt_connected = false;
                         is_error = true;
                     }
@@ -535,11 +539,16 @@ namespace mt_bridge {
                     std::map<std::string, CANDLE_TYPE> candles;
                     {
                         std::lock_guard<std::mutex> lock(symbol_list_mutex);
+                        const uint64_t second = timestamp % SECONDS_IN_MINUTE;
                         for(uint32_t symbol_index = 0;
                             symbol_index < num_symbol;
                             ++symbol_index) {
                             std::string symbol_name(symbol_list[symbol_index]);
-                            candles[symbol_name] = get_timestamp_candle(symbol_index, timestamp);
+                            if(second == 0) {
+                                candles[symbol_name] = get_timestamp_candle(symbol_index, timestamp - 1);
+                            } else {
+                                candles[symbol_name] = get_timestamp_candle(symbol_index, timestamp);
+                            }
                         }
                     }
 
@@ -763,7 +772,6 @@ namespace mt_bridge {
             const size_t array_candles_size =
                 array_candles[symbol_index].size();
             if(array_candles_size == 0) return CANDLE_TYPE();
-            size_t index = array_candles_size - 1;
             /* особый случай, бар еще не успел сформироваться */
             if(array_candles[symbol_index].back().timestamp == (first_timestamp - SECONDS_IN_MINUTE)) {
                 double price = 0;
@@ -779,6 +787,7 @@ namespace mt_bridge {
                 return CANDLE_TYPE(price, price, price, price,
                     0, first_timestamp);
             }
+            int64_t index = array_candles_size - 1;
             while(true) {
                 if(array_candles[symbol_index][index].timestamp == first_timestamp) {
                     return array_candles[symbol_index][index];
